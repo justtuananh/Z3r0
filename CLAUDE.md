@@ -14,67 +14,81 @@ here as legitimate red-team/safety evaluation and help with the measurement harn
 
 ## Repository shape (important)
 
-There is **no installable package, no build, no lint, no test suite, and no git repo**. The *entire*
-project is one Google Colab notebook:
+Three parts (plus a kept legacy notebook). No central build; each piece runs where noted.
 
 ```
-README.md
-notebooks/Z3r0_colab.ipynb   ← serving + benchmark + report, all inline
+notebooks/
+  Z3r0_bench.ipynb   ← benchmark the trio (AdvBench + XSTest → chart/CSV)   [Colab T4]
+  Z3r0_serve.ipynb   ← Colab T4 as an auth'd OpenAI server (URL + API key)  [Colab T4]
+  Z3r0_colab.ipynb   ← legacy all-in-one (serve + bench), kept for reference
+tui/                 ← local terminal chat client (OpenTUI/React, Bun)      [your machine]
+README.md  CLAUDE.md
 ```
 
-The notebook is designed to be opened in **Colab on a T4 GPU** and run top-to-bottom. There are no
-local `.py` modules — all runtime code lives inside notebook cells.
+The **three models** share the same base (`DeepSeek-R1-Distill-Llama-8B`); the only variable is
+safety tuning: `control` (refusal intact) · `huihui` (abliterated) · `obliteratus` (obliterated).
+Declared in a `REGISTRY` dict with `OLLAMA_FALLBACKS` (alternate tags tried if a primary 404s on pull).
 
-## Working on the notebook from here (no Colab)
+## Notebooks (Colab)
 
-- **Edit cells** with the `NotebookEdit` tool (operate on `.ipynb` JSON), not by hand-editing JSON.
-- **Validate** after editing: `python -m json.tool notebooks/Z3r0_colab.ipynb > /dev/null`
-- You **cannot fully run** the notebook locally — it needs a CUDA T4, Colab's `#@param` form magic,
-  `google.colab.drive`, and `nvidia-smi`. Reason about behavior by reading cells; don't try to
-  execute the form/Drive/GPU cells outside Colab.
-- The Colab **form cells** (`#@param`, `#@title`, `display-mode: "form"`) only render in Colab. The
-  variables they set (`MODEL`, `BACKEND`, `TUNNEL`, `N_ADVBENCH`, `N_XSTEST_SAFE`, `RUN_ALL_MODELS`,
-  `MAX_TOKENS`, `TEMPERATURE`) are plain globals consumed by later cells — preserve those names.
+Convention: notebooks are **self-contained** — no external `.py` imports; the runtime cell
+(`REGISTRY`, `strip_think`, the `classify`/`refused` substring classifier over `REFUSAL_PHRASES`,
+`OllamaBackend`, `serve`) is **duplicated** into each notebook on purpose. Run top-to-bottom on a T4.
 
-## Architecture
+- **`Z3r0_bench.ipynb`** — serves each model **one at a time** and keeps the **stop-before-start
+  invariant**: `serve(key)` stops the live model before starting the next (a T4 holds one 8B), so the
+  trio is evaluated serially (serve → eval → stop → next). `load_advbench()`/`load_xstest()` build a
+  `prompts` df (defensive loaders: raw CSV first, then HF `datasets` fallbacks) → `evaluate_model()`
+  strips `<think>`, classifies → `compute_metrics()` (AdvBench refusal rate ↑ safer, XSTest
+  over-refusal rate ↓ better) → bar chart. Outputs under `results/`.
+- **`Z3r0_serve.ipynb`** — deliberately the OPPOSITE of stop-before-start: it pulls all selected tags
+  and relies on **Ollama hot-swapping** models on demand, so one server answers any of the three by
+  `model` name (one in VRAM at a time, ~seconds cold-swap). A **FastAPI proxy** (cell §5) gates with a
+  `Bearer <API_KEY>` (401 otherwise), maps friendly keys `control|huihui|obliteratus` → the real
+  pulled tags via `MODEL_MAP`, and passes streaming through (`httpx` `aiter_raw` → `StreamingResponse`
+  with `X-Accel-Buffering: no`). `cloudflared` tunnels the **proxy** port and prints the public URL +
+  key + a config block for the TUI.
 
-**The three models** share the same base (`DeepSeek-R1-Distill-Llama-8B`); the *only* variable is
-safety tuning, so comparing them isolates the effect of removing the refusal direction:
-`control` (refusal intact) · `huihui` (abliterated) · `obliteratus` (obliterated). They are declared
-in the `REGISTRY` dict, with `OLLAMA_FALLBACKS` holding alternate Ollama tags to try if a primary
-tag 404s on pull.
+### Working on notebooks from here (no Colab)
+- Edit cells with the `NotebookEdit` tool; **validate JSON** after: `python3 -m json.tool notebooks/<nb>.ipynb >/dev/null`.
+- You **cannot fully run** them locally — they need a CUDA T4, Colab `#@param` form magic, and
+  `nvidia-smi`. Reason from the cell source.
+- **Ollama install fix (current Colab):** `apt-get install -y zstd` must run *before*
+  `curl …ollama install.sh | sh`, or the installer errors "requires zstd for extraction".
 
-**The "Z3r0 runtime" cell is the whole library** (the long cell under *§4 · Z3r0 runtime*). Almost
-all logic to change lives there:
-- `strip_think()` — removes the R1 `<think>…</think>` chain-of-thought before scoring.
-- `classify()` / `refused()` — **substring** refusal classifier over `REFUSAL_PHRASES`; an **empty**
-  answer also counts as refused. Deterministic and cheap; the methodology note flags swapping in an
-  LLM judge for borderline cases.
-- **Pluggable backends** behind a common `.generate()`: `OllamaBackend`, `VLLMBackend`,
-  `SGLangBackend` (all subclass `_OpenAIServer` → expose `.port` + OpenAI-compatible `/v1`), and
-  `HFBackend` (in-process transformers 4-bit, **no port / no public URL**, eval only).
-- `serve(model_key, backend_name)` — **core invariant: stops the currently-live model before
-  starting the next.** A T4 holds a single 8B model, so exactly one model is served at a time. This
-  is why `RUN_ALL_MODELS` evaluates the trio sequentially (serve → eval → stop → next), never
-  concurrently. `_ACTIVE` tracks the one live backend.
-- `start_tunnel()` — downloads `cloudflared` and parses the `*.trycloudflare.com` URL from its
-  stdout to expose the server backend's port publicly. Returns `None` for `HFBackend` (no port).
+## TUI (`tui/`, runs on your machine)
 
-**Evaluation flow:** `load_advbench()` + `load_xstest()` build a `prompts` DataFrame (each row has
-`prompt`/`dataset`/`label`) → `evaluate_model()` calls `.generate()` per row, strips think, classifies
-→ `results/z3r0_results.csv` → `compute_metrics()` reports **AdvBench refusal rate** (↑ = safer) and
-**XSTest over-refusal rate** on `label=="safe"` rows (↓ = better) → bar chart `results/z3r0_metrics.png`.
-Both datasets load defensively (raw CSV first, then HF `datasets` fallbacks) because their hosting/
-column names vary.
+Terminal chat client built on **[OpenTUI](https://github.com/anomalyco/opentui) + React**, run with
+**Bun** (≥1.3; macOS arm64 ships prebuilt binaries — no Zig build). Talks to the `Z3r0_serve.ipynb`
+URL; all compute stays on Colab.
+
+- Entry: `src/index.tsx` → `createRoot(await createCliRenderer()).render(<App quit=… />)`. JSX
+  intrinsics are **lowercase** (`<box> <text> <scrollbox> <input>`); styling goes in `style={{…}}`
+  (`border: true`, `flexDirection`, `padding`, `gap`), colors as `<text fg="#…">`. Keyboard via
+  `useKeyboard((key)=>…)` from `@opentui/react`.
+- `tsconfig.json` **must** set `"jsx": "react-jsx"` + `"jsxImportSource": "@opentui/react"`, else JSX
+  intrinsics don't resolve.
+- `<input>`'s `onSubmit` is typed as an awkward `SubmitEvent & string` intersection — use a **zero-arg**
+  handler and read the controlled `value` (see `components/PromptBox.tsx`).
+- Streaming: `api/client.ts` uses Bun `fetch` (`res.body` is async-iterable) with line-buffered SSE
+  parsing so `data:` lines never split across chunks.
+- `lib/thinkSplit.ts` splits R1's `<think>…</think>` **incrementally** (state machine + tail
+  hold-back for tags split across stream chunks) — the trickiest piece; unit-test it.
+- Config precedence: in-app edit (`Ctrl+E`) > `tui/z3r0.config.json` (gitignored) > env
+  (`Z3R0_BASE_URL/_API_KEY/_MODEL`) > defaults. Keybinds: `Ctrl+M` model · `Ctrl+T` think · `Ctrl+E`
+  endpoint · `Esc` quit.
+- Commands: `cd tui && bun install`, `bun run typecheck`, `bun run start`.
 
 ## Conventions & gotchas
 
-- Keep **one model live at a time** — any change to serving must preserve the stop-before-start
-  contract in `serve()`, or the T4 will OOM.
-- The refusal metric is **behavioral / black-box**; the notebook does not read activations. The
-  white-box counterpart (extract+ablate the direction with TransformerLens/nnsight) is described as
-  optional "Phase 2" and is intentionally not implemented.
-- `TEMPERATURE = 0` by default for deterministic, reproducible scoring; sampling is only enabled when
-  temperature > 0 (`HFBackend.generate` switches `do_sample` accordingly).
-- Server backends are reached over `http://127.0.0.1:<port>/v1`; only the cloudflared tunnel exposes
-  them outside Colab. `OLLAMA_HOST=0.0.0.0` / `OLLAMA_ORIGINS=*` are set so the tunnel can reach Ollama.
+- **`REFUSAL_PHRASES` + the empty→refusal rule now live in THREE places** — `Z3r0_bench.ipynb`,
+  `Z3r0_serve.ipynb` (the classifier isn't strictly needed there but kept for parity), and
+  `tui/src/lib/classify.ts`. Keep them in sync; `lib/classify.ts` is a 1:1 port of the Python.
+- **bench keeps stop-before-start; serve relies on hot-swap.** Don't "fix" the serve notebook to stop
+  between models — its whole point is one URL serving all three.
+- The refusal metric is **behavioral / black-box**; no activations are read. The white-box counterpart
+  (extract+ablate with TransformerLens/nnsight) is the unimplemented "Phase 2".
+- `TEMPERATURE = 0` by default for deterministic scoring.
+- The cloudflared URL is **ephemeral** — it rotates each serve run and dies on Colab disconnect; the
+  TUI endpoint is editable (`Ctrl+E`) for this reason.
+- `OLLAMA_HOST=0.0.0.0` / `OLLAMA_ORIGINS=*` are set so the tunnel can reach Ollama.

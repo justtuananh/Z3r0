@@ -11,3 +11,10 @@ results/
 __pycache__/
 *.pyc
 .venv/
+
+# TUI (Bun / OpenTUI)
+tui/node_modules/
+tui/z3r0.config.json
+tui/*.log
+tui/sessions/
+tui/exports/

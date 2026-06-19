@@ -1,0 +1,5 @@
+{
+  "baseUrl": "https://REPLACE-ME.trycloudflare.com",
+  "apiKey": "paste-the-key-printed-by-Z3r0_serve.ipynb",
+  "model": "control"
+}

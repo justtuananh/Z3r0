@@ -1,0 +1,21 @@
+{
+  "name": "z3r0-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Z3r0 — local terminal chat client (OpenTUI/React) for the Colab serve endpoint",
+  "scripts": {
+    "start": "bun run src/index.tsx",
+    "typecheck": "bun --bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.4.1",
+    "@opentui/react": "^0.4.1",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.6.0"
+  }
+}
