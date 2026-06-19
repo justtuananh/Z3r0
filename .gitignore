@@ -1,0 +1,13 @@
+# Local Claude Code config (machine-specific permissions/settings)
+.claude/settings.local.json
+
+# Notebook / run outputs (generated in Colab)
+results/
+*.csv
+*.png
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
